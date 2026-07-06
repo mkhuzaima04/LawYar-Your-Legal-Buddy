@@ -1,0 +1,102 @@
+[
+  {
+    "id": "q1",
+    "question": "Punishment for theft under PPC?",
+    "expected_sections": ["PPC 379"]
+  },
+  {
+    "id": "q2",
+    "question": "Who can record a confession from an accused person?",
+    "expected_sections": ["CRPC 164"]
+  },
+  {
+    "id": "q3",
+    "question": "Funding a banned (proscribed) organization—what section applies?",
+    "expected_sections": ["AntiTerrorismAct 11F"]
+  },
+  {
+    "id": "q4",
+    "question": "Cyber stalking on social media—what law covers it?",
+    "expected_sections": ["PECA2016 24"]
+  },
+  {
+    "id": "q5",
+    "question": "If someone gives false evidence in court, what is the punishment?",
+    "expected_sections": ["PPC 193"]
+  },
+  {
+    "id": "q6",
+    "question": "Possessing 2 kilograms of heroin—what punishment applies?",
+    "expected_sections": ["ControlOfNarcotics 9"]
+  },
+  {
+    "id": "q7",
+    "question": "Is defamation bailable and cognizable?",
+    "expected_sections": ["CRPC Schedule II"]
+  },
+  {
+    "id": "q8",
+    "question": "Criminal breach of trust by a partner taking company funds—what section?",
+    "expected_sections": ["PPC 405", "PPC 406"]
+  },
+  {
+    "id": "q9",
+    "question": "What is house-breaking by night defined as?",
+    "expected_sections": ["PPC 446"]
+  },
+  {
+    "id": "q10",
+    "question": "Punishment for house-breaking by night?",
+    "expected_sections": ["PPC 457"]
+  },
+  {
+    "id": "q11",
+    "question": "Dishonestly receiving stolen property—what section?",
+    "expected_sections": ["PPC 411"]
+  },
+  {
+    "id": "q12",
+    "question": "Cheating and dishonestly inducing delivery of property—what section?",
+    "expected_sections": ["PPC 420"]
+  },
+  {
+    "id": "q13",
+    "question": "Definition of forgery—what section?",
+    "expected_sections": ["PPC 463"]
+  },
+  {
+    "id": "q14",
+    "question": "Using a forged document as genuine—what section applies?",
+    "expected_sections": ["PPC 471"]
+  },
+  {
+    "id": "q15",
+    "question": "Cyberbullying on social media—what section applies?",
+    "expected_sections": ["PECA2016 24A"]
+  },
+  {
+    "id": "q16",
+    "question": "False and fake information online—what section applies?",
+    "expected_sections": ["PECA2016 26A"]
+  },
+  {
+    "id": "q17",
+    "question": "Freezing property of a proscribed organization—what section applies?",
+    "expected_sections": ["AntiTerrorismAct 11O"]
+  },
+  {
+    "id": "q18",
+    "question": "Freezing assets in narcotics investigations—what section applies?",
+    "expected_sections": ["ControlOfNarcotics 38"]
+  },
+  {
+    "id": "q19",
+    "question": "Banks must report suspicious narcotics transactions—what section?",
+    "expected_sections": ["ControlOfNarcotics 67"]
+  },
+  {
+    "id": "q20",
+    "question": "How long can police keep a person without producing them before a magistrate?",
+    "expected_sections": ["CRPC 61"]
+  }
+]

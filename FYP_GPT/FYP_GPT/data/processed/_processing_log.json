@@ -1,0 +1,152 @@
+{
+  "run_at": "2026-04-18T15:22:11.790319",
+  "success": [
+    {
+      "file": "CRPC.pdf",
+      "law": "CRPC",
+      "chunks": 561
+    },
+    {
+      "file": "PPC.pdf",
+      "law": "PPC",
+      "chunks": 607
+    },
+    {
+      "file": "anti-terrorism_act.pdf",
+      "law": "AntiTerrorismAct",
+      "chunks": 94
+    },
+    {
+      "file": "civil_procedure_1908.pdf",
+      "law": "CivilProcedure1908",
+      "chunks": 1153
+    },
+    {
+      "file": "companies_act.pdf",
+      "law": "CompaniesAct",
+      "chunks": 869
+    },
+    {
+      "file": "constitution1973.pdf",
+      "law": "Constitution1973",
+      "chunks": 436
+    },
+    {
+      "file": "contract_act.pdf",
+      "law": "ContractAct",
+      "chunks": 201
+    },
+    {
+      "file": "control-of-narcotics.pdf",
+      "law": "ControlOfNarcotics",
+      "chunks": 120
+    },
+    {
+      "file": "domestic_violence_act.pdf",
+      "law": "DomesticViolenceAct",
+      "chunks": 25
+    },
+    {
+      "file": "family-courts-1964.pdf",
+      "law": "FamilyCourts1964",
+      "chunks": 37
+    },
+    {
+      "file": "guardians-and-ward.pdf",
+      "law": "GuardiansAndWard",
+      "chunks": 57
+    },
+    {
+      "file": "hudood.pdf",
+      "law": "Hudood",
+      "chunks": 12
+    },
+    {
+      "file": "juvenile_justice_system.pdf",
+      "law": "JuvenileJusticeSystem",
+      "chunks": 24
+    },
+    {
+      "file": "motor_vehicles_1965.pdf",
+      "law": "MotorVehicles1965",
+      "chunks": 219
+    },
+    {
+      "file": "muslim-family-laws-1961.pdf",
+      "law": "MuslimFamilyLaws1961",
+      "chunks": 13
+    },
+    {
+      "file": "nab_ordinance.pdf",
+      "law": "NABOrdinance",
+      "chunks": 66
+    },
+    {
+      "file": "offence_of_qazf.pdf",
+      "law": "OffenceOfQazf",
+      "chunks": 11
+    },
+    {
+      "file": "peca-2016.pdf",
+      "law": "PECA2016",
+      "chunks": 82
+    },
+    {
+      "file": "police_order.pdf",
+      "law": "PoliceOrder",
+      "chunks": 191
+    },
+    {
+      "file": "protection_against_harassment.pdf",
+      "law": "ProtectionAgainstHarassment",
+      "chunks": 13
+    },
+    {
+      "file": "punjab-land-revenue.pdf",
+      "law": "PunjabLandRevenue",
+      "chunks": 189
+    },
+    {
+      "file": "punjab_consumer_protection.pdf",
+      "law": "PunjabConsumerProtection",
+      "chunks": 40
+    },
+    {
+      "file": "punjab_marriage_function.pdf",
+      "law": "PunjabMarriageFunctions",
+      "chunks": 12
+    },
+    {
+      "file": "punjab_rented_premises.pdf",
+      "law": "PunjabRentedPremises",
+      "chunks": 35
+    },
+    {
+      "file": "punjab_shops.pdf",
+      "law": "PunjabShopsAndEstablishments",
+      "chunks": 42
+    },
+    {
+      "file": "qanun-e-shahadat.pdf",
+      "law": "QanunEShahadat",
+      "chunks": 173
+    },
+    {
+      "file": "specific-relief-1877.pdf",
+      "law": "SpecificRelief1877",
+      "chunks": 56
+    },
+    {
+      "file": "tenancy-punjab.pdf",
+      "law": "TenancyPunjab",
+      "chunks": 113
+    },
+    {
+      "file": "transfer-of-property.pdf",
+      "law": "TransferOfProperty",
+      "chunks": 138
+    }
+  ],
+  "failed": [],
+  "skipped": []
+}

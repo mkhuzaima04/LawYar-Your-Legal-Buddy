@@ -1,0 +1,885 @@
+retrieval.py:
+import os
+import json
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer, CrossEncoder
+
+
+class LegalRetriever:
+    def __init__(
+        self,
+        index_dir="D:/FYP_GPT/data/index",
+        model_name="intfloat/multilingual-e5-base",
+        reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        device=None,
+    ):
+        print("Loading metadata...")
+        meta_path = os.path.join(index_dir, "metadata.json")
+        with open(meta_path, "r", encoding="utf-8") as f:
+            self.metadata = json.load(f)
+
+        print("Loading FAISS index...")
+        index_path = os.path.join(index_dir, "faiss.index")
+        self.index = faiss.read_index(index_path)
+
+        print(f"Loading embedding model: {model_name}...")
+        self.model = SentenceTransformer(model_name, device=device)
+
+        self.use_e5 = "e5" in model_name.lower()
+        self.model_name = model_name
+        self.device = device
+
+        self.reranker = None
+        if reranker_model:
+            print(f"Loading reranker: {reranker_model}...")
+            self.reranker = CrossEncoder(reranker_model, device=device)
+            self.reranker_name = reranker_model
+        else:
+            self.reranker_name = None
+
+        print("Retriever is ready.\n")
+
+    def _encode_query(self, query: str):
+        query_text = f"query: {query}" if self.use_e5 else query
+        vec = self.model.encode([query_text], normalize_embeddings=True)
+        return np.asarray(vec, dtype="float32")
+
+    def _rerank(self, query: str, candidates: list, top_k: int):
+        if not self.reranker or not candidates:
+            return candidates[:top_k]
+
+        pairs = [(query, c["text"]) for c in candidates]
+        scores = self.reranker.predict(pairs)
+
+        for c, s in zip(candidates, scores):
+            c["rerank_score"] = float(s)
+
+        candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+        return candidates[:top_k]
+
+    def search(self, query: str, top_k: int = 3, law_filter: str = None, min_score: float = None, rerank: bool = True):
+        if not query or not query.strip():
+            return []
+
+        query_vector = self._encode_query(query.strip())
+
+        # Fetch more for reranking and/or law filtering
+        if law_filter or rerank:
+            fetch_k = min(len(self.metadata), max(top_k * 10, 50))
+        else:
+            fetch_k = min(len(self.metadata), top_k)
+
+        distances, indices = self.index.search(query_vector, fetch_k)
+
+        candidates = []
+        for i, idx in enumerate(indices[0]):
+            if idx == -1:
+                continue
+
+            chunk_meta = self.metadata[idx]
+
+            if law_filter and chunk_meta.get("law") != law_filter:
+                continue
+
+            score = float(distances[0][i])
+            if min_score is not None and score < min_score:
+                continue
+
+            candidates.append({
+                "score": score,
+                "law": chunk_meta.get("law"),
+                "section_number": chunk_meta.get("section_number"),
+                "section_title": chunk_meta.get("section_title"),
+                "section": f"Section {chunk_meta.get('section_number')} - {chunk_meta.get('section_title')}",
+                "chunk_id": chunk_meta.get("id"),
+                "page_approx": chunk_meta.get("page_approx"),
+                "text": chunk_meta.get("text"),
+            })
+
+        if rerank:
+            return self._rerank(query, candidates, top_k)
+
+        return candidates[:top_k]
+
+
+if __name__ == "__main__":
+    retriever = LegalRetriever()
+
+    test_query = "What are the rules for qatl-i-amd and giving diyat?"
+
+    print(f"Searching for: '{test_query}'")
+
+    results = retriever.search(test_query, top_k=3, law_filter="PPC", rerank=True)
+
+    print("\n" + "=" * 50)
+    for i, res in enumerate(results, 1):
+        print(f"RESULT {i} (Similarity Score: {res['score']:.4f})")
+        if "rerank_score" in res:
+            print(f"Rerank Score: {res['rerank_score']:.4f}")
+        print(f"Law: {res['law']}")
+        print(f"Heading: {res['section']}")
+        print(f"Chunk ID: {res['chunk_id']} | Page: {res['page_approx']}")
+        print(f"Text Preview: {res['text'][:250]}...")
+        print("-" * 50)
+
+
+qa_harness.py:
+import os
+import re
+import json
+import argparse
+
+from retrieval import LegalRetriever
+
+# Reuse the same retrieval pipeline helpers as main.py
+from main import (
+    expand_queries,
+    collect_candidates,
+    _add_law_bias_candidates,
+    _add_section_fallbacks,
+    _add_crpc_schedule_snippet,
+)
+
+
+def _law_key(law: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (law or "").lower())
+
+
+def _norm_section_num(value: str) -> str:
+    v = str(value or "").strip()
+    if v.lower().startswith("schedule"):
+        v = "Schedule II"
+    return re.sub(r"[^0-9A-Za-z]", "", v).upper()
+
+
+def _parse_expected_section(s: str, default_law: str = None):
+    s = (s or "").strip()
+    if not s:
+        return None
+
+    if ":" in s:
+        law, sec = s.split(":", 1)
+        return _law_key(law), sec.strip()
+
+    # If it's just a number and default law is provided
+    if default_law and re.fullmatch(r"\d+[A-Za-z]?", s):
+        return _law_key(default_law), s
+
+    # Otherwise, assume first token is law, rest is section
+    parts = s.split()
+    if len(parts) == 1 and default_law:
+        return _law_key(default_law), parts[0]
+    if len(parts) >= 2:
+        law = parts[0]
+        sec = " ".join(parts[1:])
+        return _law_key(law), sec.strip()
+
+    return None
+
+
+def _normalize_expected_sections(case: dict):
+    expected = []
+    default_law = case.get("law_filter")
+
+    for item in case.get("expected_sections", []):
+        if isinstance(item, dict):
+            law = item.get("law") or default_law
+            sec = item.get("section") or item.get("section_number") or item.get("section_id")
+            if law and sec:
+                sec_val = _norm_section_num(sec)
+                expected.append((_law_key(law), sec_val))
+        elif isinstance(item, str):
+            parsed = _parse_expected_section(item, default_law)
+            if parsed:
+                law, sec = parsed
+                expected.append((law, _norm_section_num(sec)))
+
+    return expected
+
+
+def _normalize_expected_laws(case: dict):
+    return [_law_key(l) for l in case.get("expected_laws", []) if l]
+
+
+def _build_found(results):
+    found = set()
+    for r in results:
+        law = _law_key(r.get("law"))
+        sec = _norm_section_num(r.get("section_number"))
+        found.add((law, sec))
+    return found
+
+
+def _rank_lookup(results):
+    lookup = {}
+    for i, r in enumerate(results, start=1):
+        key = (_law_key(r.get("law")), _norm_section_num(r.get("section_number")))
+        if key not in lookup:
+            lookup[key] = i
+    return lookup
+
+
+def _make_summary_table(summary: dict):
+    rows = [
+        {"metric": "Total", "value": summary["total"]},
+        {"metric": "Passed", "value": summary["passed"]},
+        {"metric": "Accuracy", "value": f"{summary['accuracy']:.2f}"},
+    ]
+
+    if summary.get("avg_section_recall") is not None:
+        rows.append({
+            "metric": "Avg Section Recall",
+            "value": f"{summary['avg_section_recall']:.2f}",
+        })
+    else:
+        rows.append({"metric": "Avg Section Recall", "value": "n/a"})
+
+    md_lines = ["| Metric | Value |", "|---|---|"]
+    for row in rows:
+        md_lines.append(f"| {row['metric']} | {row['value']} |")
+
+    return rows, "\n".join(md_lines)
+
+
+def _pair_to_str(pair):
+    law, sec = pair
+    return f"{law.upper()} {sec}"
+
+
+def _list_to_str(pairs, max_items=6):
+    if not pairs:
+        return ""
+    items = [_pair_to_str(p) for p in pairs[:max_items]]
+    if len(pairs) > max_items:
+        items.append(f"+{len(pairs) - max_items} more")
+    return "; ".join(items)
+
+
+def _rank_str(ranks: dict, expected_pairs: list):
+    if not expected_pairs:
+        return ""
+    parts = []
+    for law, sec in expected_pairs:
+        key = f"{law}:{sec}"
+        rank = ranks.get(key)
+        rank_val = "n/a" if rank is None else str(rank)
+        parts.append(f"{law.upper()} {sec}: {rank_val}")
+    return "; ".join(parts)
+
+
+def _build_markdown_report(summary_md: str, results_out: list) -> str:
+    lines = []
+    lines.append("# QA Report")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(summary_md)
+    lines.append("")
+
+    lines.append("## Cases")
+    lines.append("")
+    lines.append("| ID | Question | Expected | Passed | Missing | Ranks |")
+    lines.append("|---|---|---|---|---|---|")
+    for r in results_out:
+        expected = _list_to_str(r.get("expected_sections", []))
+        missing = _list_to_str(r.get("missing", []))
+        ranks = _rank_str(r.get("ranks", {}), r.get("expected_sections", []))
+        passed = "Yes" if r.get("passed") else "No"
+        q = (r.get("question") or "").replace("|", "\\|")
+        lines.append(f"| {r.get('id')} | {q} | {expected} | {passed} | {missing} | {ranks} |")
+
+    misses = [r for r in results_out if not r.get("passed")]
+    if misses:
+        lines.append("")
+        lines.append("## Miss Details")
+        lines.append("")
+        lines.append("| ID | Question | Expected | Found (Top K) |")
+        lines.append("|---|---|---|---|")
+        for r in misses:
+            expected = _list_to_str(r.get("expected_sections", []))
+            found = _list_to_str(r.get("found_sections", []), max_items=10)
+            q = (r.get("question") or "").replace("|", "\\|")
+            lines.append(f"| {r.get('id')} | {q} | {expected} | {found} |")
+
+    return "\n".join(lines)
+
+
+def run_case(retriever, case, top_k, candidate_k, rerank=True):
+    question = case["question"]
+    law_filter = case.get("law_filter")
+
+    queries = expand_queries(question)
+    candidates = collect_candidates(
+        retriever,
+        queries,
+        candidate_k=candidate_k,
+        law_filter=law_filter,
+        min_score=case.get("min_score"),
+    )
+
+    _add_law_bias_candidates(retriever, candidates, question, candidate_k)
+    pinned_ids = _add_section_fallbacks(retriever, candidates, question)
+    pinned_ids.update(_add_crpc_schedule_snippet(retriever, candidates, question))
+
+    candidate_list = list(candidates.values())
+    if rerank and getattr(retriever, "reranker", None):
+        results = retriever._rerank(question, candidate_list, top_k)
+    else:
+        candidate_list.sort(key=lambda x: x.get("score", 0), reverse=True)
+        results = candidate_list[:top_k]
+
+    # Ensure pinned appear in results
+    if pinned_ids:
+        existing = {r.get("chunk_id") for r in results}
+        for pid in pinned_ids:
+            if pid in existing:
+                continue
+            if pid in candidates:
+                results.append(candidates[pid])
+
+    return results
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--qa", default="D:/FYP_GPT/data/qa/qa_set.json")
+    parser.add_argument("--report", default="D:/FYP_GPT/data/qa/qa_report.json")
+    parser.add_argument("--report-md", default="D:/FYP_GPT/data/qa/qa_report.md")
+    parser.add_argument("--index-dir", default="D:/FYP_GPT/data/index")
+    parser.add_argument("--embed-model", default="intfloat/multilingual-e5-base")
+    parser.add_argument("--reranker", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--candidate-k", type=int, default=50)
+    parser.add_argument("--no-rerank", action="store_true")
+    parser.add_argument("--max-examples", type=int, default=None)
+    parser.add_argument("--show-misses", action="store_true")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.qa):
+        raise FileNotFoundError(f"QA file not found: {args.qa}")
+
+    with open(args.qa, "r", encoding="utf-8") as f:
+        cases = json.load(f)
+
+    if args.max_examples:
+        cases = cases[: args.max_examples]
+
+    retriever = LegalRetriever(
+        index_dir=args.index_dir,
+        model_name=args.embed_model,
+        reranker_model=None if args.no_rerank else args.reranker,
+        device=args.device,
+    )
+
+    results_out = []
+    total = 0
+    pass_count = 0
+    recall_sum = 0.0
+    recall_n = 0
+
+    for case in cases:
+        total += 1
+        res = run_case(
+            retriever,
+            case,
+            top_k=args.top_k,
+            candidate_k=args.candidate_k,
+            rerank=not args.no_rerank,
+        )
+
+        expected_sections = _normalize_expected_sections(case)
+        expected_laws = _normalize_expected_laws(case)
+        found = _build_found(res)
+        rank_lookup = _rank_lookup(res)
+
+        hits = []
+        missing = []
+        for ex in expected_sections:
+            if ex in found:
+                hits.append(ex)
+            else:
+                missing.append(ex)
+
+        law_hit = False
+        if expected_laws:
+            found_laws = {law for (law, _) in found}
+            law_hit = any(l in found_laws for l in expected_laws)
+
+        # Pass criteria
+        if expected_sections:
+            passed = len(missing) == 0
+            recall = len(hits) / max(1, len(expected_sections))
+            recall_sum += recall
+            recall_n += 1
+        else:
+            passed = law_hit
+            recall = None
+
+        if passed:
+            pass_count += 1
+
+        result_entry = {
+            "id": case.get("id"),
+            "question": case.get("question"),
+            "expected_sections": expected_sections,
+            "expected_laws": expected_laws,
+            "found_sections": sorted(list(found)),
+            "hits": hits,
+            "missing": missing,
+            "law_hit": law_hit,
+            "passed": passed,
+            "top_k": args.top_k,
+            "ranks": {f"{k[0]}:{k[1]}": rank_lookup.get(k) for k in expected_sections},
+        }
+        results_out.append(result_entry)
+
+        if args.show_misses and not passed:
+            print(f"\nMISS: {case.get('question')}")
+            if missing:
+                print(f"  missing sections: {missing}")
+            if expected_laws and not law_hit:
+                print(f"  missing laws: {expected_laws}")
+
+    summary = {
+        "total": total,
+        "passed": pass_count,
+        "accuracy": (pass_count / total) if total else 0,
+        "avg_section_recall": (recall_sum / recall_n) if recall_n else None,
+    }
+
+    summary_rows, summary_md = _make_summary_table(summary)
+
+    report = {
+        "summary": summary,
+        "summary_table": summary_rows,
+        "summary_table_md": summary_md,
+        "results": results_out,
+    }
+
+    os.makedirs(os.path.dirname(args.report), exist_ok=True)
+    with open(args.report, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    if args.report_md:
+        md = _build_markdown_report(summary_md, results_out)
+        os.makedirs(os.path.dirname(args.report_md), exist_ok=True)
+        with open(args.report_md, "w", encoding="utf-8") as f:
+            f.write(md)
+
+    print("\nQA SUMMARY")
+    print(f"  Total:   {summary['total']}")
+    print(f"  Passed:  {summary['passed']}")
+    print(f"  Acc:     {summary['accuracy']:.2f}")
+    if summary["avg_section_recall"] is not None:
+        print(f"  Recall:  {summary['avg_section_recall']:.2f}")
+
+    print("\nSUMMARY TABLE")
+    print(summary_md)
+    print(f"\nReport saved to: {args.report}")
+    if args.report_md:
+        print(f"Markdown report saved to: {args.report_md}")
+
+
+if __name__ == "__main__":
+    main()
+
+chunk_all.py:
+
+import os
+import json
+import sys
+import argparse
+from datetime import datetime
+
+# Add scripts dir to path so we can import chunk_single
+sys.path.insert(0, os.path.dirname(__file__))
+from chunk_single import extract_chunks, save_json
+
+# ─────────────────────────────────────────────
+#  FILENAME → LAW NAME MAPPING
+#  Key   = your actual PDF filename (without .pdf)
+#  Value = clean name used in JSON and chunk IDs
+# ─────────────────────────────────────────────
+LAW_MAP = {
+    "anti-terrorism_act":       "AntiTerrorismAct",
+    "Constitution":             "Constitution",
+    "constitution1973":         "Constitution1973",
+    "control-of-narcotics":     "ControlOfNarcotics",
+    "CRPC":                     "CRPC",
+    "family-courts-1964":       "FamilyCourts1964",
+    "guardians-and-ward":       "GuardiansAndWard",
+    "hudood":                   "Hudood",
+    "muslim-family-laws-1961":  "MuslimFamilyLaws1961",
+    "offence_of_qazf":          "OffenceOfQazf",
+    "peca-2016":                "PECA2016",
+    "PPC":                      "PPC",
+    "punjab-land-revenue":      "PunjabLandRevenue",
+    "qanun-e-shahadat":         "QanunEShahadat",
+    "specific-relief-1877":     "SpecificRelief1877",
+    "tenancy-punjab":           "TenancyPunjab",
+    "transfer-of-property":     "TransferOfProperty",
+    "civil_procedure_1908":     "CivilProcedure1908",
+    "companies_act":            "CompaniesAct",
+    "contract_act":             "ContractAct",
+    "domestic_violence_act":    "DomesticViolenceAct",
+    "juvenile_justice_system":  "JuvenileJusticeSystem",
+    "nab_ordinance":            "NABOrdinance",
+    "police_order":             "PoliceOrder",
+}
+
+# ─────────────────────────────────────────────
+#  PATHS — adjust if your structure differs
+# ─────────────────────────────────────────────
+RAW_DIR_DEFAULT       = "../data/raw"
+PROCESSED_DIR_DEFAULT = "../data/processed"
+
+
+def run_all(raw_dir: str, processed_dir: str, log_path: str, min_chars: int, only_list: list):
+    results = {
+        "run_at": datetime.now().isoformat(),
+        "success": [],
+        "failed": [],
+        "skipped": []
+    }
+
+    if not os.path.isdir(raw_dir):
+        print(f"❌ Raw directory not found: {raw_dir}")
+        return
+
+    pdf_files = [f for f in os.listdir(raw_dir) if f.lower().endswith(".pdf")]
+
+    if only_list:
+        only_set = {o.strip().lower() for o in only_list if o.strip()}
+        pdf_files = [f for f in pdf_files if f.lower().replace(".pdf", "") in only_set]
+
+    if not pdf_files:
+        print(f"❌ No PDFs found in {raw_dir}")
+        return
+
+    law_map_ci = {k.lower(): v for k, v in LAW_MAP.items()}
+
+    print(f"\n🔍 Found {len(pdf_files)} PDFs in {raw_dir}")
+    print("="*60)
+
+    for filename in sorted(pdf_files):
+        stem = filename.replace(".pdf", "")
+        law_name = law_map_ci.get(stem.lower())
+
+        if not law_name:
+            print(f"\n⚠️  SKIPPED: {filename}")
+            print(f"   No mapping found. Add '{stem}' to LAW_MAP in chunk_all.py")
+            results["skipped"].append(filename)
+            continue
+
+        pdf_path = os.path.join(raw_dir, filename)
+        print(f"\n▶ Processing: {filename} → {law_name}")
+
+        try:
+            chunks = extract_chunks(pdf_path, law_name, min_chars=min_chars)
+
+            if not chunks:
+                print(f"   ⚠️  0 chunks extracted — check patterns for this law")
+                results["failed"].append({
+                    "file": filename,
+                    "reason": "0 chunks extracted"
+                })
+                continue
+
+            save_json(chunks, law_name, processed_dir)
+            results["success"].append({
+                "file": filename,
+                "law": law_name,
+                "chunks": len(chunks)
+            })
+
+        except Exception as e:
+            print(f"   ❌ ERROR: {e}")
+            results["failed"].append({
+                "file": filename,
+                "reason": str(e)
+            })
+
+    # Print summary
+    print("\n" + "="*60)
+    print("PROCESSING SUMMARY")
+    print("="*60)
+    print(f"✅ Success : {len(results['success'])} laws")
+    print(f"❌ Failed  : {len(results['failed'])} laws")
+    print(f"⚠️  Skipped : {len(results['skipped'])} laws")
+
+    if results["failed"]:
+        print("\nFailed files:")
+        for f in results["failed"]:
+            print(f"  • {f['file']}: {f['reason']}")
+
+    if results["skipped"]:
+        print("\nSkipped files (add to LAW_MAP):")
+        for f in results["skipped"]:
+            print(f"  • {f}")
+
+    # Save log
+    os.makedirs(processed_dir, exist_ok=True)
+    with open(log_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"\n📋 Log saved → {log_path}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--raw", default=RAW_DIR_DEFAULT)
+    parser.add_argument("--out", default=PROCESSED_DIR_DEFAULT)
+    parser.add_argument("--log", default="")
+    parser.add_argument("--min-chars", type=int, default=80)
+    parser.add_argument("--only", default="", help="Comma-separated list of PDF stems to process")
+    args = parser.parse_args()
+
+    log_path = args.log or os.path.join(args.out, "_processing_log.json")
+    only_list = [s.strip() for s in args.only.split(",")] if args.only else []
+
+    run_all(args.raw, args.out, log_path, args.min_chars, only_list)
+
+build_index.py:
+
+import os
+import json
+import argparse
+from datetime import datetime
+
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+
+
+def build_text(chunk: dict) -> str:
+    parts = [
+        chunk.get("law", ""),
+        chunk.get("section_number", ""),
+        chunk.get("section_title", ""),
+        chunk.get("text", ""),
+    ]
+    return " ".join([p for p in parts if p]).strip()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", default="D:/FYP_GPT/data/merged/all_laws.json")
+    parser.add_argument("--out-dir", default="D:/FYP_GPT/data/index")
+    parser.add_argument("--model", default="intfloat/multilingual-e5-base")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--max-chars", type=int, default=0, help="0 = no truncation")
+    parser.add_argument("--device", default=None, help="e.g. cpu or cuda")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        raise FileNotFoundError(f"Merged JSON not found: {args.input}")
+
+    with open(args.input, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    chunks = data.get("chunks", [])
+    if not chunks:
+        raise ValueError("No chunks found in merged JSON")
+
+    texts = []
+    metadata = []
+
+    use_e5 = "e5" in args.model.lower()
+    for idx, ch in enumerate(chunks):
+        text = build_text(ch)
+        if args.max_chars and len(text) > args.max_chars:
+            text = text[: args.max_chars]
+        if use_e5:
+            text = "passage: " + text
+        texts.append(text)
+        metadata.append({
+            "index": idx,
+            "id": ch.get("id"),
+            "law": ch.get("law"),
+            "chapter": ch.get("chapter"),
+            "section_number": ch.get("section_number"),
+            "section_title": ch.get("section_title"),
+            "page_approx": ch.get("page_approx"),
+            "char_count": ch.get("char_count"),
+            "text": ch.get("text"),
+        })
+
+    model = SentenceTransformer(args.model, device=args.device)
+    embeddings = model.encode(
+        texts,
+        batch_size=args.batch_size,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+    )
+
+    embeddings = np.asarray(embeddings, dtype="float32")
+    dim = embeddings.shape[1]
+
+    index = faiss.IndexFlatIP(dim)
+    index.add(embeddings)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    index_path = os.path.join(args.out_dir, "faiss.index")
+    meta_path = os.path.join(args.out_dir, "metadata.json")
+    info_path = os.path.join(args.out_dir, "index_info.json")
+
+    faiss.write_index(index, index_path)
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False)
+
+    info = {
+        "created_at": datetime.now().isoformat(),
+        "model": args.model,
+        "vector_dim": dim,
+        "num_chunks": len(metadata),
+        "input": os.path.abspath(args.input),
+        "index": os.path.abspath(index_path),
+        "metadata": os.path.abspath(meta_path),
+        "normalize_embeddings": True,
+        "distance": "cosine (via inner product)",
+        "notes": "Use 'query: ' prefix for e5 models during search.",
+    }
+
+    with open(info_path, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2)
+
+    print("Index built successfully")
+    print(f"Chunks: {len(metadata)}")
+    print(f"Dim: {dim}")
+    print(f"Index: {index_path}")
+    print(f"Metadata: {meta_path}")
+
+
+if __name__ == "__main__":
+    main()
+
+merge.py:
+
+import os
+import json
+from datetime import datetime
+
+BASE_DIR = os.path.dirname(__file__)
+PROCESSED_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "processed"))
+MERGED_DIR    = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "merged"))
+OUTPUT_FILE   = os.path.join(MERGED_DIR, "all_laws.json")
+
+
+def merge_all():
+    json_files = [
+        f for f in os.listdir(PROCESSED_DIR)
+        if f.endswith(".json") and not f.startswith("_")  # skip log files
+    ]
+
+    if not json_files:
+        print(f"No JSON files found in {PROCESSED_DIR}")
+        return
+
+    print(f"\nFound {len(json_files)} law JSONs to merge")
+
+    all_chunks = []
+    law_stats = []
+
+    for filename in sorted(json_files):
+        path = os.path.join(PROCESSED_DIR, filename)
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        chunks = data.get("chunks", [])
+        all_chunks.extend(chunks)
+        law_stats.append({
+            "law": data.get("law"),
+            "chunks": len(chunks)
+        })
+        print(f"  {data.get('law'):30s} → {len(chunks):4d} chunks")
+
+    # Build final merged DB
+    merged = {
+        "merged_at": datetime.now().isoformat(),
+        "total_laws": len(json_files),
+        "total_chunks": len(all_chunks),
+        "law_breakdown": law_stats,
+        "chunks": all_chunks
+    }
+
+    os.makedirs(MERGED_DIR, exist_ok=True)
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        json.dump(merged, f, ensure_ascii=False, indent=2)
+
+    print(f"\n{'='*60}")
+    print(f"Merged DB saved → {OUTPUT_FILE}")
+    print(f"   Total laws  : {len(json_files)}")
+    print(f"   Total chunks: {len(all_chunks)}")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    merge_all()
+
+search_index.py:
+import os
+import json
+import argparse
+
+import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--index", default="D:/FYP_GPT/data/index/faiss.index")
+    parser.add_argument("--meta", default="D:/FYP_GPT/data/index/metadata.json")
+    parser.add_argument("--model", default="intfloat/multilingual-e5-base")
+    parser.add_argument("--query", required=True)
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--device", default=None)
+    args = parser.parse_args()
+
+    if not os.path.exists(args.index):
+        raise FileNotFoundError(f"Index not found: {args.index}")
+    if not os.path.exists(args.meta):
+        raise FileNotFoundError(f"Metadata not found: {args.meta}")
+
+    with open(args.meta, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    index = faiss.read_index(args.index)
+    model = SentenceTransformer(args.model, device=args.device)
+
+    query = args.query.strip()
+    if "e5" in args.model.lower():
+        query = "query: " + query
+
+    q_emb = model.encode([query], normalize_embeddings=True)
+    q_emb = np.asarray(q_emb, dtype="float32")
+
+    scores, idxs = index.search(q_emb, args.top_k)
+
+    print(f"\nTop {args.top_k} results for: {args.query}\n")
+    for rank, (score, idx) in enumerate(zip(scores[0], idxs[0]), start=1):
+        if idx < 0 or idx >= len(metadata):
+            continue
+        m = metadata[idx]
+        print(f"{rank}. {m.get('law')} | Section {m.get('section_number')} — {m.get('section_title')}")
+        print(f"   Score: {score:.4f} | Chunk ID: {m.get('id')}")
+        text = (m.get("text") or "").strip().replace("\n", " ")
+        print(f"   {text[:400]}...")
+        print()
+
+
+if __name__ == "__main__":
+    main()
+
+
+check these then i'll give you main.py
+
+
+
+
+
+
+
+
